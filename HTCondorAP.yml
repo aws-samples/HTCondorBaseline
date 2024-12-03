@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Portable HTCondor EC2 Instances with Secrets Manager integration'
+
+Parameters:
+  HTCondorPasswordSecretName:
+    Type: String
+    Description: 'Name of the secret in Secrets Manager containing the HTCondor password'
+    Default: 'HTCondorPassword'
+  HTCondorPassword:
+    Type: String
+    Description: 'Password for HTCondor'
+    NoEcho: true
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: 'AMI ID for the EC2 instances'
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'Select the VPC where you want to deploy the EC2 instances'
+  Subnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Select a subnet within the chosen VPC'
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: 'Name of an existing EC2 KeyPair to enable SSH access to the instances'
+  YourIp:
+    Type: String
+    Description: 'Your IP address for SSH access (e.g., 203.0.113.0/32)'
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/32$'
+    ConstraintDescription: 'Must be a valid IP address in CIDR notation (e.g., 203.0.113.0/32)'
+
+Resources:
+  HTCondorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for HTCondor instances
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref YourIp
+        # - IpProtocol: tcp
+        #   FromPort: 9618
+        #   ToPort: 9618
+        #   CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+
+
+#### role
+  SpotFleetTaggingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'SpotFleetTaggingRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: spotfleet.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AdministratorAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetAutoscaleRole'
+        - 'arn:aws:iam::aws:policy/AmazonSSMFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole'
+
+  HTCondorSecurityGroupSelfReference:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref HTCondorSecurityGroup
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !Ref HTCondorSecurityGroup
+
+  HTCondorPasswordSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Ref HTCondorPasswordSecretName
+      Description: 'Secret for HTCondor password'
+      SecretString: !Ref HTCondorPassword
+
+  HTCondorInstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - ec2.amazonaws.com
+                - lambda.amazonaws.com
+              
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetAutoscaleRole
+
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref HTCondorPasswordSecret
+        - PolicyName: SecretsManagerWriteAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:CreateSecret'
+                  - 'secretsmanager:PutSecretValue'
+                Resource: '*'
+        - PolicyName: SecretsprivateDNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: 'arn:aws:secretsmanager:*:*:secret:*'
+        - PolicyName: AnnexPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DeleteStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:GetTemplate
+                  - cloudformation:ValidateTemplate
+                Resource: 
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/HTCondorAnnex-*/*'
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketPolicy
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - 'arn:aws:s3:::htcondor-annex-*'
+                  - 'arn:aws:s3:::htcondor-annex-*/*'
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:CreateInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:PassRole
+                  - iam:CreateInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetRolePolicy
+                  - iam:GetInstanceProfile
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSpotFleetRequests
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/HTCondorAnnex-*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/HTCondorAnnex-*'
+              - Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:InvokeFunction
+                  - lambda:AddPermission
+                  - lambda:DeleteFunction
+                Resource: 
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:HTCondorAnnex-*'
+              - Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:DescribeSecurityGroups
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                  - 'events:PutTargets'
+                  - 'events:RemoveTargets'
+
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - lambda:DeleteFunction
+                  - s3:DeleteBucket
+                  - s3:DeleteObject
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DeleteInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+
+
+
+
+  HTCondorInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref HTCondorInstanceRole
+  
+  HTCondorAPInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.large
+      ImageId: !Ref AmiId
+      IamInstanceProfile: !Ref HTCondorInstanceProfile
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - !Ref HTCondorSecurityGroup
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-HTCondorAP
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            
+            cat << 'EOF' > /home/ec2-user/setup_htcondor.sh
+            #!/bin/bash
+            cd ~
+            curl https://pages.cs.wisc.edu/~tlmiller/indexed/condor-23.0.13-0.739879-x86_64_AlmaLinux9-stripped.tar.gz -o condor.tar.gz
+            tar -x -f condor.tar.gz
+            mv condor-*stripped condor
+            cd condor
+            ./bin/make-personal-from-tarball
+
+            . ~/condor/condor.sh 
+
+            rm local/config.d/00-personal-condor
+
+            # Get the instance's private DNS
+            PRIVATE_DNS=$(curl -s http://169.254.169.254/latest/meta-data/local-hostname)
+            FORMATTED_PRIVATE_DNS=$(echo $PRIVATE_DNS | cut -d. -f1)
+
+            # Store the private DNS in Secrets Manager
+            aws secretsmanager create-secret \
+              --name "${AWS::StackName}-HTCondorEPPrivateDNS" \
+              --description "Private DNS of HTCondor EP instance" \
+              --secret-string "$FORMATTED_PRIVATE_DNS" \
+              --region ${AWS::Region}
+
+            # If the secret already exists, you might want to update it instead:
+            # aws secretsmanager put-secret-value \
+            #   --secret-id "${AWS::StackName}-HTCondorEPPrivateDNS" \
+            #   --secret-string "$FORMATTED_PRIVATE_DNS" \
+            #   --region ${AWS::Region}
+
+
+
+            cat << EOT > local/config.d/00-config-AP
+            use role: Submit, CentralManager
+
+            # Make this a single-node pool.
+            DAEMON_LIST = MASTER, COLLECTOR, SCHEDD, NEGOTIATOR
+
+            NETWORK_INTERFACE = *
+            CONDOR_HOST = $(FULL_HOSTNAME)
+
+            SEC_DAEMON_INTEGRITY = REQUIRED
+            SEC_DAEMON_AUTHENTICATION = REQUIRED
+            SEC_DAEMON_AUTHENTICATION_METHODS = PASSWORD
+            SEC_NEGOTIATOR_INTEGRITY = REQUIRED
+            SEC_NEGOTIATOR_AUTHENTICATION = REQUIRED
+            SEC_NEGOTIATOR_AUTHENTICATION_METHODS = PASSWORD
+            SEC_CLIENT_AUTHENTICATION_METHODS = FS, PASSWORD
+            ALLOW_DAEMON = *
+
+            # ------------------------------------------------------------------------------
+
+            SEC_PASSWORD_FILE = /home/ec2-user/condor/local/condor_pool_password
+
+            #update below for AP
+            TCP_FORWARDING_HOST = $(FORMATTED_PRIVATE_DNS)
+            COLLECTOR_HOST = $(FORMATTED_PRIVATE_DNS):9618
+            HOSTALLOW_READ = *
+            HOSTALLOW_WRITE = *
+            HOSTALLOW_ADMINISTRATOR = *
+            ALLOW_WRITE = * 
+            ALLOW_NEGOTIATOR = *
+            ALLOW_ADMINISTRATOR = *
+            ALLOW_READ = *
+            ALLOW_NEGOTIATOR_SCHEDD = *
+            ALLOW_WRITE_COLLECTOR = *
+            ALLOW_WRITE_STARTD    = *
+            ALLOW_READ_COLLECTOR  = *
+            ALLOW_READ_STARTD     = *
+            ALLOW_CLIENT = *
+
+            
+            EOT
+
+            # Update COLLECTOR_HOST and TCP_FORWARDING_HOST
+            PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+            sed -i "s/TCP_FORWARDING_HOST = .*/TCP_FORWARDING_HOST = $FORMATTED_PRIVATE_DNS/" local/config.d/00-config-AP
+            sed -i "s/COLLECTOR_HOST = .*/COLLECTOR_HOST = $FORMATTED_PRIVATE_DNS:9618/" local/config.d/00-config-AP
+
+  
+            echo "${HTCondorPassword}" | condor_store_cred -c add -f $(condor_config_val SEC_PASSWORD_FILE)
+            condor_master
+            EOF
+
+            chmod +x /home/ec2-user/setup_htcondor.sh
+            su - ec2-user -c '/home/ec2-user/setup_htcondor.sh'
+            #rm /home/ec2-user/setup_htcondor.sh
+          - HTCondorPassword: !Ref HTCondorPassword
+
+
+Outputs:
+  StackName:
+    Description: "Name of this CloudFormation stack"
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub "${AWS::StackName}-StackName"
+  APInstanceId:
+    Description: Instance ID of the HTCondor Access Point
+    Value: !Ref HTCondorAPInstance
+  HTCondorEPPrivateDNSSecretName:
+    Description: "Name of the secret storing the HTCondor EP instance's private DNS"
+    Value: !Sub "${AWS::StackName}-HTCondorEPPrivateDNS"
+    Export:
+      Name: !Sub "${AWS::StackName}-HTCondorEPPrivateDNSSecretName"
+  HTCondorSecurityGroupId:
+    Description: "ID of the HTCondor Security Group"
+    Value: !Ref HTCondorSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-HTCondorSecurityGroupId"
+
+  HTCondorInstanceProfileArn:
+    Description: "ARN of the HTCondor Instance Profile"
+    Value: !GetAtt HTCondorInstanceProfile.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-HTCondorInstanceProfileArn"
+
+  HTCondorInstanceProfileName:
+    Description: "Name of the HTCondor Instance Profile"
+    Value: !Ref HTCondorInstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-HTCondorInstanceProfileName"
+
+  RoleARN:
+    Description: 'ARN of the created IAM Role'
+    Value: !GetAtt SpotFleetTaggingRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RoleARN'

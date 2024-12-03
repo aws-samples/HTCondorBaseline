@@ -1,0 +1,22 @@
+{
+    "TargetCapacity": 20,
+    "IamFleetRole": "arn:aws:iam::605478051081:role/AmazonSpotFleetTaggingRole",
+    "SpotPrice": "2.987000",
+    "LaunchSpecifications": [
+        {
+            "ImageId": "ami-095aa9b1d869d31ce",
+            "KeyName": "oregon",
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-0adc7c42c62f8d35d"
+                }
+            ],
+            "InstanceType": "t3.large",
+            "IamInstanceProfile": {
+            "Arn": "arn:aws:iam::6054174077081:instance-profile/oregon1-HTCondorInstanceProfile-V2Beg73QJTHT"
+            },
+            "UserData" : "IyEvYmluL2Jhc2gKRUMyUHJpdmF0ZUROUz0kKGN1cmwgLXMgaHR0cDovLzE2OS4yNTQuMTY5LjI1NC9sYXRlc3QvbWV0YS1kYXRhL2xvY2FsLWhvc3RuYW1lIHwgY3V0IC1kLiAtZjEpCnNlZCAtaSAicy9FQzJQcml2YXRlRE5TLyRFQzJQcml2YXRlRE5TL2ciIC9ob21lL2VjMi11c2VyL2NvbmRvci9sb2NhbC9jb25maWcuZC8wMC1jb25maWctRVAKc3UgZWMyLXVzZXIgLWMgJy4gL2hvbWUvZWMyLXVzZXIvY29uZG9yL2NvbmRvci5zaDsgY29uZG9yX21hc3RlciAmJw=="
+        }
+    ]
+  }
+

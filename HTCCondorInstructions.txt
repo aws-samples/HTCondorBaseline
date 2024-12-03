@@ -1,0 +1,151 @@
+IMDS Default Settings (This is regional, will have to set again for other regions)
+EC2> Data protection and security 
+IMDS Defaults
+	Instance Metadata
+	  Enabled
+	Metadata version 
+	  V1 and V2 (token optional)
+	Access to tags in metadata
+	  Enabled
+
+
+Create a Keypair 
+
+Run AP-Stack 
+Parameters 
+you can get the AMI-ID by Ec2>launch instance scroll to AMI and let it populate under summary on right hand side (dont actually launch instance but take the ami-Id under Software Image in Summary)
+HTcondor password - type a password of your choice
+Do not need to change anything that is already prefilled
+Your IP needs /32 at end of it for format 
+
+After your template completes you can run EP-Stack
+Parameters:
+Use same AMI-ID,vpc,subnet,keypair, IP as in AP stack
+Password I usually use same password as in AP stack
+CustomPrivateDNS value can be located in the output value of AP stack 
+SourceStackName is the name you named the AP stack
+ 
+This will also create an image along with the EP that will later be used for the annex, copy the ID of the Image in Ec2>images
+
+Log into AP instance, I usually work out of condor directory
+cd condor
+. ~/condor/condor.sh
+condor_master
+
+condor_annex -aws-region us-west-2 -setup (change the region to region you are working in)
+
+while this is setting up resources when the lambda stage is complete go to lambda in the console
+Change the check connectivity function to have a timeout of 1 min.  (Configuration > General configuration)
+Add permissions to the role by navigating to (Configuration > Permissions), click role > add permissions > create inline policy > click JSON and paste in
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "VisualEditor0",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:CreateNetworkInterface",
+                "ec2:CreateNetworkInterfacePermission",
+                "ec2:DescribeNetworkInterfaces",
+                "ec2:DeleteNetworkInterface"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+Name it whatever you want
+For each lambda function (there should be 3) Navigate to Configurations >VPC and add the vpc, subnet, and security group that you created in stack
+
+In the command line once it says Setup successful run the next command 
+condor_annex -check-setup
+should get your setup looks ok as response
+
+
+create a file in the condor directory name it annex.json
+
+for IamFleetRole use the role in output of AP stack
+for Instance profile use the output of the AP stack
+
+{
+    "TargetCapacity": 20,
+    "IamFleetRole": "arn:xxxxxxxxxxxx",
+    "SpotPrice": "2.987000",
+    "LaunchSpecifications": [
+        {
+            "ImageId": "xxxxxxxxxxxx",
+            "KeyName": "xxxxxxxxxxxx",
+            "SecurityGroups": [
+                {
+                    "GroupId": "xxxxxxxxxxxx"
+                }
+            ],
+            "InstanceType": "t3.large",
+            "IamInstanceProfile": {
+            "Arn": "arn:xxxxxxxxxxxx"
+            },
+            "UserData" : "IyEvYmluL2Jhc2gKRUMyUHJpdmF0ZUROUz0kKGN1cmwgLXMgaHR0cDovLzE2OS4yNTQuMTY5LjI1NC9sYXRlc3QvbWV0YS1kYXRhL2xvY2FsLWhvc3RuYW1lIHwgY3V0IC1kLiAtZjEpCnNlZCAtaSAicy9FQzJQcml2YXRlRE5TLyRFQzJQcml2YXRlRE5TL2ciIC9ob21lL2VjMi11c2VyL2NvbmRvci9sb2NhbC9jb25maWcuZC8wMC1jb25maWctRVAKc3UgZWMyLXVzZXIgLWMgJy4gL2hvbWUvZWMyLXVzZXIvY29uZG9yL2NvbmRvci5zaDsgY29uZG9yX21hc3RlciAmJw=="
+        }
+    ]
+  }
+
+
+Now run 
+condor_annex -annex-name MyAnnex2 -aws-spot-fleet-config-file /home/ec2-user/condor/annex.json -slots 3     
+
+in condor directiory 
+
+vi sleep.sh
+
+#!/bin/bash
+# file name: sleep.sh
+
+TIMETOWAIT="20"
+echo "sleeping for $TIMETOWAIT seconds"
+echo `hostname`
+/bin/sleep $TIMETOWAIT
+
+vi sleep.sub 
+
+executable              = sleep.sh
+
+log                     = jobs/$(Cluster)/log/sleep_$(Process).log
+output                  = jobs/$(Cluster)/out/sleep_$(Process).out
+error                   = jobs/$(Cluster)/err/sleep_$(Process).err
+
+should_transfer_files   = Yes
+when_to_transfer_output = ON_EXIT
+
+request_cpus            = 1
+request_memory          = 512M
+request_disk            = 1G
+
++MayUseAWS              = TRUE
+
+queue 100
+
+
+Then run 
+
+condor_submit sleep.sub
+
+Then run
+
+condor_q
+
+If you see some of the jobs running then it is working properly
+
+
+
+CLEANUP:
+When deleting stack delete ami and snapshot that was created for EP to avoid incurring costs
+
+
+
+
+
+
+
+
+
+
+

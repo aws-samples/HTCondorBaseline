@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'HTCondor EC2 Instances with Secrets Manager integration'
+
+Parameters:
+  CustomPrivateDNS:
+    Type: String
+    Description: "HTCondorEPPrivateDNSSecretName Output from AP"
+  HTCondorPasswordSecretName2:
+    Type: String
+    Description: 'Name of the secret in Secrets Manager containing the HTCondor password'
+    Default: 'HTCondorPassword2'
+  HTCondorPassword2:
+    Type: String
+    Description: 'Password for HTCondor'
+    NoEcho: true
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: 'AMI ID for the EC2 instances'
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'Select the VPC where you want to deploy the EC2 instances'
+  Subnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Select a subnet within the chosen VPC'
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: 'Name of an existing EC2 KeyPair to enable SSH access to the instances'
+  YourIp:
+    Type: String
+    Description: 'Your IP address for SSH access (e.g., 203.0.113.0/32)'
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/32$'
+    ConstraintDescription: 'Must be a valid IP address in CIDR notation (e.g., 203.0.113.0/32)'
+  SourceStackName:
+    Type: String
+    Description: 'Name of the source stack (AP) to import values from, DO NOT USE THE NAME OF THIS STACK'
+
+
+Resources:
+  HTCondorPasswordSecret2:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Ref HTCondorPasswordSecretName2
+      Description: 'Secret for HTCondor password'
+      SecretString: !Ref HTCondorPassword2
+
+  
+  HTCondorEPInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.large
+      ImageId: !Ref AmiId
+      IamInstanceProfile:         
+        Fn::ImportValue: !Sub "${SourceStackName}-HTCondorInstanceProfileName"
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub "${SourceStackName}-HTCondorSecurityGroupId"
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-HTCondorEP
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            
+            cat << 'EOF' > /home/ec2-user/setup_htcondor.sh
+            #!/bin/bash
+            cd ~
+            curl https://pages.cs.wisc.edu/~tlmiller/indexed/condor-23.0.13-0.739879-x86_64_AlmaLinux9-stripped.tar.gz -o condor.tar.gz
+            tar -x -f condor.tar.gz
+            mv condor-*stripped condor
+            cd condor
+            ./bin/make-personal-from-tarball
+
+            . ~/condor/condor.sh 
+
+            rm local/config.d/00-personal-condor
+            cat << EOT > local/config.d/00-config-EP
+            use security: host_based
+            use role: Execute
+
+            # Make this an execution point 
+            DAEMON_LIST = MASTER, STARTD
+
+            NETWORK_INTERFACE = *
+            CONDOR_HOST = $(FULL_HOSTNAME)
+
+            SEC_DAEMON_INTEGRITY = REQUIRED
+            SEC_DAEMON_AUTHENTICATION = REQUIRED
+            SEC_DAEMON_AUTHENTICATION_METHODS = PASSWORD
+            SEC_NEGOTIATOR_INTEGRITY = REQUIRED
+            SEC_NEGOTIATOR_AUTHENTICATION = REQUIRED
+            SEC_NEGOTIATOR_AUTHENTICATION_METHODS = PASSWORD
+            SEC_CLIENT_AUTHENTICATION_METHODS = FS, PASSWORD
+            ALLOW_DAEMON = *
+
+            # ------------------------------------------------------------------------------
+
+            SEC_PASSWORD_FILE = /home/ec2-user/condor/local/condor_pool_password
+
+            #
+            # Note that EC2-Private-DNS (without the dashes) is set by the user data.
+            TCP_FORWARDING_HOST = EC2PrivateDNS
+            # Note that this is hardcoded and we should use an EIP so it does not change
+            COLLECTOR_HOST = $(PRIVATE_DNS):9618
+            HOSTALLOW_READ = *
+            HOSTALLOW_WRITE = *
+            HOSTALLOW_ADMINISTRATOR = *
+            ALLOW_WRITE = * 
+            ALLOW_NEGOTIATOR = *
+            ALLOW_ADMINISTRATOR = *
+            ALLOW_READ = *
+            ALLOW_NEGOTIATOR_SCHEDD = *
+            ALLOW_WRITE_COLLECTOR = *
+            ALLOW_WRITE_STARTD    = *
+            ALLOW_READ_COLLECTOR  = *
+            ALLOW_READ_STARTD     = *
+            ALLOW_CLIENT = *
+            COLLECTOR_HOST = $(PRIVATE_DNS):9618
+
+            EOT
+
+            # Update COLLECTOR_HOST and TCP_FORWARDING_HOST
+            PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+            PRIVATE_DNS=$(aws secretsmanager get-secret-value --secret-id ${CustomPrivateDNS} --query SecretString --output text --region ${AWS::Region})
+
+            # sed -i "s/TCP_FORWARDING_HOST = .*/TCP_FORWARDING_HOST = $PRIVATE_IP/" local/config.d/00-config-EP
+            sed -i "s/COLLECTOR_HOST = .*/COLLECTOR_HOST = $PRIVATE_DNS:9618/" local/config.d/00-config-EP
+
+            echo "${HTCondorPassword2}" | condor_store_cred -c add -f $(condor_config_val SEC_PASSWORD_FILE)
+            #condor_master
+            EOF
+
+            chmod +x /home/ec2-user/setup_htcondor.sh
+            su - ec2-user -c '/home/ec2-user/setup_htcondor.sh'
+            rm /home/ec2-user/setup_htcondor.sh
+
+            # Wait for a bit to ensure all services are up and running
+            sleep 60
+
+            # Create an AMI of the instance
+            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+            AMI_NAME="HTCondor-EP-AMI-$(date +%Y%m%d-%H%M%S)"
+            aws ec2 create-image --instance-id $INSTANCE_ID --name "$AMI_NAME" --description "AMI for HTCondor EP instance" --no-reboot --region ${AWS::Region}
+
+          - HTCondorPassword2: !Ref HTCondorPassword2
+
+Outputs:
+  EPInstanceId:
+    Description: Instance ID of the HTCondor Access Point
+    Value: !Ref HTCondorEPInstance
+
