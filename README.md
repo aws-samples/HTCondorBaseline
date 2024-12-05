@@ -1,14 +1,16 @@
 ## My Project
-
-TODO: Fill this README out!
-
-Be sure to:
-
-* Change the title in this README
-* Edit your repository description on GitHub
+HTCondor Baseline
 
 **Introduction**
-HTCondor is a robust workload management system for distributed computing. This project integrates HTCondor with AWS, leveraging cloud resources for scalable and efficient high-throughput computing tasks.
+HTCondor is a robust workload management system for distributed computing. This project integrates HTCondor with Amazon Web Services (AWS), leveraging cloud resources for scalable and efficient high-throughput computing tasks.
+
+The CloudFormation templates provided in this project are designed to simplify and automate the deployment of HTCondor in AWS. They create two key components:
+
+Access Point (AP) Stack: This sets up the "master" node of the HTCondor cluster. The Access Point is responsible for managing the overall state of the system and distributing workloads.
+
+Execution Point (EP) Stack: This creates the "worker" nodes of the cluster. The Execution Points are responsible for performing the actual jobs and tasks assigned by the Access Point.
+
+This architecture follows a common pattern in distributed systems, with a central control plane (the Access Point) managing the overall state and coordinating work, while individual worker nodes (the Execution Points) focus on executing tasks. This division of responsibilities helps to scale the system and improve overall efficiency and reliability.
 
 
 **Key features:**
