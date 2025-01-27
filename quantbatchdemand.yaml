@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Basic HPC setup for quantitative research using AWS Batch'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC where the compute environment will be created'
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'Private subnets for the compute environment'
+
+Resources:
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: batch.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+
+  BatchInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  BatchInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BatchInstanceRole
+
+  BatchLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceMarketOptions:
+          MarketType: on-demand
+
+  QuantComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      ServiceRole: !GetAtt BatchServiceRole.Arn
+      ComputeResources:
+        Type: EC2
+        MinvCpus: 0
+        DesiredvCpus: 0
+        MaxvCpus: 128
+        InstanceTypes:
+          - c5.large
+          - c5.xlarge
+          - c5.2xlarge
+          - c5.4xlarge
+        Subnets: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref BatchSecurityGroup
+        InstanceRole: !GetAtt BatchInstanceProfile.Arn
+        AllocationStrategy: BEST_FIT_PROGRESSIVE
+        LaunchTemplate:
+          LaunchTemplateId: !Ref BatchLaunchTemplate
+        Ec2Configuration:
+          - ImageType: ECS_AL2
+      State: ENABLED
+
+  BatchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Batch compute environment
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  FairSharePolicy:
+    Type: AWS::Batch::SchedulingPolicy
+    Properties:
+      FairsharePolicy:
+        ComputeReservation: 0
+        ShareDecaySeconds: 3600
+        ShareDistribution:
+          - ShareIdentifier: Default
+            WeightFactor: 1.0
+      Name: !Sub '${AWS::StackName}-fairshare-policy'
+
+  QuantJobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      Priority: 1
+      State: ENABLED
+      SchedulingPolicyArn: !Ref FairSharePolicy
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref QuantComputeEnvironment
+
+  QuantJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      SchedulingPriority: 1
+      ContainerProperties:
+        Image: public.ecr.aws/amazonlinux/amazonlinux:2
+        Command:
+          - /bin/bash
+          - -c
+          - |
+            yum install -y python3-pip
+            pip3 install numpy pandas
+            python3 -c '
+            import numpy as np
+            import pandas as pd
+            
+            print("Starting quantitative analysis...")
+            
+            # Simulate stock price data
+            np.random.seed(42)
+            days = 252
+            returns = np.random.normal(0.0001, 0.02, days)
+            price = 100 * np.exp(np.cumsum(returns))
+            
+            print("\nSimulated Price Data:")
+            print(f"Initial Price: ${price[0]:.2f}")
+            print(f"Final Price: ${price[-1]:.2f}")
+            
+            # Calculate moving averages
+            ma_20 = pd.Series(price).rolling(window=20).mean()
+            ma_50 = pd.Series(price).rolling(window=50).mean()
+            
+            print("\nMoving Averages at final point:")
+            print(f"20-day MA: ${ma_20.iloc[-1]:.2f}")
+            print(f"50-day MA: ${ma_50.iloc[-1]:.2f}")
+            
+            # Simple trading strategy
+            signals = np.where(ma_20 > ma_50, 1, -1)
+            returns = np.diff(price) / price[:-1]
+            strategy_returns = signals[:-1] * returns
+            
+            print("\nStrategy Results:")
+            print(f"Total Returns: {(np.exp(np.sum(strategy_returns)) - 1):.2%}")
+            print(f"Strategy Sharpe Ratio: {np.mean(strategy_returns) / np.std(strategy_returns) * np.sqrt(252):.2f}")
+            print("\nAnalysis completed successfully!")
+            '
+        Memory: 2048
+        Vcpus: 2
+      RetryStrategy:
+        Attempts: 2
+      Timeout:
+        AttemptDurationSeconds: 300
+
+Outputs:
+  JobQueueArn:
+    Description: 'ARN of the created Job Queue'
+    Value: !Ref QuantJobQueue
+  
+  JobDefinitionArn:
+    Description: 'ARN of the created Job Definition'
+    Value: !Ref QuantJobDefinition
+
+  ComputeEnvironmentArn:
+    Description: 'ARN of the created Compute Environment'
+    Value: !Ref QuantComputeEnvironment
+
+  SchedulingPolicyArn:
+    Description: 'ARN of the Fair Share Scheduling Policy'
+    Value: !Ref FairSharePolicy
+
+  SecurityGroupId:
+    Description: 'ID of the Security Group created for the Compute Environment'
+    Value: !Ref BatchSecurityGroup
+
+#

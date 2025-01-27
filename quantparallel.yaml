@@ -1,0 +1,331 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Enhanced HPC setup for quantitative research using AWS Batch with parallel symbol processing'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC where the compute environment will be created'
+  
+  VpcCidr:
+    Type: String
+    Description: 'CIDR block for the VPC'
+    Default: '10.0.0.0/16'
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'Private subnets for the compute environment'
+  
+  AllocationStrategy:
+    Type: String
+    Default: BEST_FIT_PROGRESSIVE
+    AllowedValues:
+      - BEST_FIT
+      - BEST_FIT_PROGRESSIVE
+      - SPOT_CAPACITY_OPTIMIZED
+    Description: 'Strategy to use for selecting instance types'
+  
+  MinvCpus:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 256
+    Description: 'Minimum number of vCPUs to maintain'
+  
+  MaxvCpus:
+    Type: Number
+    Default: 256
+    MinValue: 0
+    MaxValue: 256
+    Description: 'Maximum number of vCPUs that can be allocated'
+  
+  RetentionDays:
+    Type: Number
+    Default: 14
+    Description: 'Number of days to retain CloudWatch logs'
+  
+  ComputeEnvironmentState:
+    Type: String
+    Default: ENABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Description: 'State of the compute environment'
+  
+  JobMemory:
+    Type: Number
+    Default: 8192
+    Description: 'Memory (in MB) allocated to each job'
+  
+  JobVCpus:
+    Type: Number
+    Default: 4
+    Description: 'Number of vCPUs allocated to each job'
+
+Resources:
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: batch.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+
+  BatchInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  BatchInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BatchInstanceRole
+
+  BatchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Batch compute environment
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  BatchJobsCloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/batch/${AWS::StackName}'
+      RetentionInDays: !Ref RetentionDays
+
+  QuantComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    DependsOn: BatchServiceRole
+    Properties:
+      Type: MANAGED
+      State: !Ref ComputeEnvironmentState
+      ServiceRole: !GetAtt BatchServiceRole.Arn
+      ComputeResources:
+        Type: EC2
+        MinvCpus: !Ref MinvCpus
+        MaxvCpus: !Ref MaxvCpus
+        DesiredvCpus: !Ref MinvCpus
+        InstanceTypes: 
+          - optimal
+        Subnets: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref BatchSecurityGroup
+        InstanceRole: !GetAtt BatchInstanceProfile.Arn
+        AllocationStrategy: !Ref AllocationStrategy
+
+  QuantJobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      Priority: 1
+      State: ENABLED
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref QuantComputeEnvironment
+
+  QuantJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      ContainerProperties:
+        Image: public.ecr.aws/amazonlinux/amazonlinux:2
+        Memory: !Ref JobMemory
+        Vcpus: !Ref JobVCpus
+        Command:
+          - /bin/bash
+          - -c
+          - |
+            set -ex
+            echo "=== Starting Job Setup at $(date) ==="
+            
+            # System information
+            echo "System Information:"
+            uname -a
+            df -h
+            
+            # Enable immediate flushing of Python output
+            export PYTHONUNBUFFERED=1
+            
+            # Install system dependencies
+            echo "Installing system dependencies..."
+            yum clean all
+            yum update -y
+            yum install -y python3-pip
+            
+            echo "Checking Python and pip versions:"
+            python3 --version
+            pip3 --version
+            
+            echo "Installing Python packages..."
+            # Install packages in specific order
+            pip3 install --no-cache-dir 'urllib3<2.0.0'
+            pip3 install --no-cache-dir numpy==1.21.6
+            pip3 install --no-cache-dir pandas==1.3.5
+            pip3 install --no-cache-dir yfinance
+            
+            echo "Verifying installations:"
+            pip3 list
+            
+            echo "Creating analysis script..."
+            tee /tmp/trading_analysis.py << 'ENDOFSCRIPT'
+            import yfinance as yf
+            import pandas as pd
+            import numpy as np
+            import os
+            import sys
+            from datetime import datetime
+
+            # Print package versions for debugging
+            print(f"Python version: {sys.version}", flush=True)
+            print(f"pandas version: {pd.__version__}", flush=True)
+            print(f"numpy version: {np.__version__}", flush=True)
+            print(f"yfinance version: {yf.__version__}", flush=True)
+
+            def print_separator():
+                print("\n" + "="*50 + "\n", flush=True)
+
+            def analyze_stock(symbol):
+                """Analyze a single stock symbol"""
+                try:
+                    print(f"\nAnalyzing {symbol}...", flush=True)
+                    
+                    # Download data
+                    print(f"Downloading data for {symbol}...", flush=True)
+                    data = yf.download(symbol, start='2020-01-01', progress=False)
+                    if data.empty:
+                        print(f"No data available for {symbol}", flush=True)
+                        return None
+                    
+                    print(f"Calculating indicators for {symbol}...", flush=True)
+                    # Calculate indicators
+                    data['MA20'] = data['Close'].rolling(window=20).mean()
+                    data['MA50'] = data['Close'].rolling(window=50).mean()
+                    data['Returns'] = data['Close'].pct_change()
+                    
+                    # Current position
+                    current_position = "BUY" if data['MA20'].iloc[-1] > data['MA50'].iloc[-1] else "SELL"
+                    
+                    # Calculate metrics
+                    current_price = float(data['Close'].iloc[-1])
+                    returns = data['Returns'].dropna()
+                    cumulative_return = float((data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100)
+                    annual_std = float(returns.std() * np.sqrt(252) * 100)
+                    sharpe_ratio = float(returns.mean() / returns.std() * np.sqrt(252))
+                    max_drawdown = float(((data['Close'] / data['Close'].cummax() - 1)).min() * 100)
+                    
+                    # Print results with explicit float conversion
+                    print(f"\nResults for {symbol}:", flush=True)
+                    print(f"Current Price: ${current_price:.2f}", flush=True)
+                    print(f"Position: {current_position}", flush=True)
+                    print(f"Cumulative Return: {cumulative_return:.2f}%", flush=True)
+                    print(f"Annual Volatility: {annual_std:.2f}%", flush=True)
+                    print(f"Sharpe Ratio: {sharpe_ratio:.2f}", flush=True)
+                    print(f"Maximum Drawdown: {max_drawdown:.2f}%", flush=True)
+                    
+                    return {
+                        'symbol': symbol,
+                        'current_price': current_price,
+                        'position': current_position,
+                        'cumulative_return': cumulative_return,
+                        'sharpe_ratio': sharpe_ratio,
+                        'max_drawdown': max_drawdown
+                    }
+                    
+                except Exception as e:
+                    print(f"Error analyzing {symbol}: {str(e)}", flush=True)
+                    print("Stack trace:", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    return None
+
+            def main():
+                try:
+                    print_separator()
+                    print(f"Job Start Time: {datetime.now()}", flush=True)
+                    print(f"AWS Batch Job ID: {os.getenv('AWS_BATCH_JOB_ID', 'N/A')}", flush=True)
+                    print(f"Array Index: {os.getenv('AWS_BATCH_JOB_ARRAY_INDEX', 'N/A')}", flush=True)
+                    
+                    # Define symbols to process
+                    symbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN']
+                    array_index = int(os.getenv('AWS_BATCH_JOB_ARRAY_INDEX', 0))
+                    
+                    if array_index >= len(symbols):
+                        print(f"Error: Array index {array_index} exceeds symbol list length", flush=True)
+                        sys.exit(1)
+                    
+                    symbol = symbols[array_index]
+                    results = analyze_stock(symbol)
+                    
+                    if results:
+                        print_separator()
+                        print("Analysis Complete", flush=True)
+                        print(f"Results: {results}", flush=True)
+                    else:
+                        print(f"Analysis failed for {symbol}", flush=True)
+                        sys.exit(1)
+                    
+                    print(f"Job End Time: {datetime.now()}", flush=True)
+                    print_separator()
+                    
+                except Exception as e:
+                    print(f"Critical error in main: {str(e)}", flush=True)
+                    sys.exit(1)
+
+            if __name__ == "__main__":
+                main()
+            ENDOFSCRIPT
+            
+            echo "Checking if script was created:"
+            ls -l /tmp/trading_analysis.py
+            
+            echo "Starting analysis script..."
+            python3 /tmp/trading_analysis.py
+        Environment:
+          - Name: PYTHONUNBUFFERED
+            Value: "1"
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref BatchJobsCloudWatchLogGroup
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: quant-analysis
+            awslogs-datetime-format: "%Y-%m-%d %H:%M:%S"
+
+
+Outputs:
+  JobQueueArn:
+    Description: 'ARN of the created Job Queue'
+    Value: !Ref QuantJobQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-JobQueueArn'
+  
+  ComputeEnvironmentArn:
+    Description: 'ARN of the created Compute Environment'
+    Value: !Ref QuantComputeEnvironment
+    Export:
+      Name: !Sub '${AWS::StackName}-ComputeEnvironmentArn'
+  
+  JobDefinitionArn:
+    Description: 'ARN of the created Job Definition'
+    Value: !Ref QuantJobDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-JobDefinitionArn'
